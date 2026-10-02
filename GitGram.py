@@ -1,342 +1,583 @@
 #!/usr/bin/env python3
-"""GitGram: GitHub webhook notifications for Telegram.
 
-Modernized for Python 3.10+ and python-telegram-bot 22.x.
-"""
-
-from __future__ import annotations
-
-import hashlib
-import hmac
-import logging
-import os
-import threading
+from logging import basicConfig, getLogger, INFO
+from flask import Flask, request, jsonify
 from html import escape
-from typing import Any
-
-import requests
-from flask import Flask, jsonify, request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-
+from requests import get, post
+from os import environ
 import config
 
+from telegram.ext import CommandHandler, Updater
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-log = logging.getLogger("gitgram")
 server = Flask(__name__)
 
-# Keep the original config.py token support, while allowing environment variables
-# for deployments. The bundled token is intentionally left untouched by this port.
-BOT_TOKEN = os.getenv("BOT_TOKEN") or config.BOT_TOKEN
-PROJECT_NAME = os.getenv("PROJECT_NAME") or config.PROJECT_NAME
-GIT_REPO_URL = os.getenv("GIT_REPO_URL") or config.GIT_REPO_URL
-APP_URL = os.getenv("APP_URL", "").rstrip("/")
-WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
-PORT = int(os.getenv("PORT", "8080"))
+basicConfig(level=INFO)
+log = getLogger()
 
-TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": "GitGram/2026"})
+ENV = bool(environ.get('ENV', False))
 
-
-def tg_request(method: str, **kwargs: Any) -> dict[str, Any]:
-    """Call Telegram Bot API with a timeout and useful error logging."""
-    try:
-        response = HTTP.post(f"{TG_API}/{method}", timeout=15, **kwargs)
-        response.raise_for_status()
-        payload = response.json()
-        if not payload.get("ok"):
-            log.error("Telegram API %s failed: %s", method, payload)
-        return payload
-    except requests.RequestException:
-        log.exception("Telegram API request failed: %s", method)
-        return {"ok": False, "description": "Telegram API request failed"}
+if ENV:
+    BOT_TOKEN = environ.get('BOT_TOKEN', None)
+    PROJECT_NAME = environ.get('PROJECT_NAME', None)
+    ip_addr = environ.get('APP_URL', None)
+    GIT_REPO_URL = environ.get(
+        'GIT_REPO_URL',
+        "https://github.com/TheArchon/GitHub-"
+    )
+else:
+    BOT_TOKEN = config.BOT_TOKEN
+    PROJECT_NAME = config.PROJECT_NAME
+    ip_addr = get('https://api.ipify.org').text
+    GIT_REPO_URL = config.GIT_REPO_URL
 
 
-def post_tg(chat: str, message: str, parse_mode: str = "HTML") -> dict[str, Any]:
-    # Telegram messages are limited to 4096 characters.
-    if len(message) > 4096:
-        message = message[:4090] + "..."
-    return tg_request(
-        "sendMessage",
+updater = Updater(token=BOT_TOKEN, workers=1)
+dispatcher = updater.dispatcher
+
+print("If you need more help, join @ArchonCare in Telegram.")
+
+
+def start(_bot, update):
+    """/start message for bot"""
+    message = update.effective_message
+    message.reply_text(
+        f"This is the Updates watcher for {PROJECT_NAME}. "
+        "I am just notify users about what's happen on their Git repositories "
+        "thru webhooks.\n\n"
+        "You need to [self-host](https://waa.ai/GitGram) "
+        "or see /help to use this bot on your groups.",
+        parse_mode="markdown"
+    )
+
+
+def help(_bot, update):
+    """/help message for the bot"""
+    message = update.effective_message
+    message.reply_text(
+        f"*Available Commands*\n\n"
+        f"`/connect` - Setup how to connect this chat to receive "
+        f"Git activity notifications.\n"
+        f"`/support` - Get links to get support if you're stuck.\n"
+        f"`/source` - Get the Git repository URL.",
+        parse_mode="markdown"
+    )
+
+
+def connect(_bot, update):
+    """Show GitHub webhook configuration for the current Telegram chat."""
+    message = update.effective_message
+    chat = update.effective_chat
+
+    if not chat:
+        return
+
+    # APP_URL from .env is preferred.
+    # If APP_URL is not set, the old public-IP detection is used.
+    base_url = (environ.get("APP_URL") or ip_addr or "").rstrip("/")
+
+    webhook_url = f"{base_url}/{chat.id}"
+
+    message.reply_text(
+        f"*GitHub Webhook Setup*\n\n"
+        f"*Chat ID:*\n`{chat.id}`\n\n"
+        f"*Payload URL:*\n`{webhook_url}`\n\n"
+        f"*Content type:*\n`application/json`\n\n"
+        f"*GitHub setup:*\n"
+        f"1. Open your GitHub repository.\n"
+        f"2. Go to Settings → Webhooks.\n"
+        f"3. Click Add webhook.\n"
+        f"4. Paste the Payload URL above.\n"
+        f"5. Select `application/json`.\n"
+        f"6. Select the events you want, or use Push events.\n"
+        f"7. Keep Active enabled.\n"
+        f"8. Save the webhook.\n\n"
+        f"After that, GitHub events from this repository will be "
+        f"sent to this Telegram chat.",
+        parse_mode="markdown"
+    )
+
+
+def support(_bot, update):
+    """Links to Support"""
+    message = update.effective_message
+    message.reply_text(
+        f"*Getting Support*\n\n"
+        f"To get support in using the bot, join "
+        f"[the GitGram support](https://t.me/ArchonCare).",
+        parse_mode="markdown"
+    )
+
+
+def source(_bot, update):
+    """Link to Source"""
+    message = update.effective_message
+    message.reply_text(
+        f"*Source*:\n[GitGram Repo](https://waa.ai/GitGram).",
+        parse_mode="markdown"
+    )
+
+
+def getSourceCodeLink(_bot, update):
+    """Pulls link to the source code."""
+    message = update.effective_message
+    message.reply_text(
+        f"{GIT_REPO_URL}"
+    )
+
+
+# Telegram command handlers
+start_handler = CommandHandler("start", start)
+help_handler = CommandHandler("help", help)
+connect_handler = CommandHandler("connect", connect)
+supportCmd = CommandHandler("support", support)
+sourcecode = CommandHandler("source", source)
+
+
+# Register handlers
+dispatcher.add_handler(start_handler)
+dispatcher.add_handler(help_handler)
+dispatcher.add_handler(connect_handler)
+dispatcher.add_handler(supportCmd)
+dispatcher.add_handler(sourcecode)
+
+
+updater.start_polling()
+
+
+TG_BOT_API = f'https://api.telegram.org/bot{BOT_TOKEN}/'
+
+checkbot = get(TG_BOT_API + "getMe").json()
+
+if not checkbot['ok']:
+    log.error("[ERROR] Invalid Token!")
+    exit(1)
+else:
+    username = checkbot['result']['username']
+    log.info(
+        f"[INFO] Logged in as @{username}, waiting for webhook requests..."
+    )
+
+
+def post_tg(chat, message, parse_mode):
+    """Send message to desired group"""
+    response = post(
+        TG_BOT_API + "sendMessage",
         params={
             "chat_id": chat,
             "text": message,
             "parse_mode": parse_mode,
-            "disable_web_page_preview": True,
-        },
-    )
+            "disable_web_page_preview": True
+        }
+    ).json()
+
+    return response
 
 
-def verify_github_signature(raw_body: bytes) -> bool:
-    """Verify GitHub's X-Hub-Signature-256 when a secret is configured."""
-    if not WEBHOOK_SECRET:
-        return True
-    supplied = request.headers.get("X-Hub-Signature-256", "")
-    if not supplied.startswith("sha256="):
-        return False
-    digest = hmac.new(
-        WEBHOOK_SECRET.encode("utf-8"), raw_body, hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(supplied, f"sha256={digest}")
+def reply_tg(chat, message_id, message, parse_mode):
+    """reply to message_id"""
+    response = post(
+        TG_BOT_API + "sendMessage",
+        params={
+            "chat_id": chat,
+            "reply_to_message_id": message_id,
+            "text": message,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }
+    ).json()
+
+    return response
 
 
-def link(url: str, label: str) -> str:
-    return f'<a href="{escape(str(url), quote=True)}">{escape(str(label))}</a>'
+@server.route("/", methods=['GET'])
+def helloWorld():
+    # Just send 'Hello, world!' to tell that our server is up.
+    return 'Hello, world!'
 
 
-def value(obj: dict[str, Any], key: str, default: str = "") -> str:
-    val = obj.get(key, default)
-    return str(val) if val is not None else default
+@server.route("/<groupid>", methods=['GET', 'POST'])
+def git_api(groupid):
+    """Requests to api.github.com"""
 
+    data = request.json
 
-# ---------------- Telegram commands ----------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            f"This is the Updates watcher for {PROJECT_NAME}. "
-            "It notifies Telegram chats about GitHub repository activity via webhooks.\n\n"
-            "Use /help for commands and connect a GitHub webhook to this bot's endpoint.",
-        )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            "Available Commands\n\n"
-            "/connect - Show how to connect a GitHub webhook.\n"
-            "/support - Get support information.\n"
-            "/source - Show the source repository."
-        )
-
-
-async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            "Support: https://t.me/GitGramChat"
-        )
-
-
-async def source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message:
-        await update.effective_message.reply_text(GIT_REPO_URL)
-
-
-def build_telegram_application() -> Application:
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("support", support))
-    application.add_handler(CommandHandler("source", source))
-    return application
-
-
-def run_bot_polling() -> None:
-    """Run PTB polling in a background thread so Flask can serve webhooks."""
-    try:
-        application = build_telegram_application()
-        application.run_polling(drop_pending_updates=True, stop_signals=None)
-    except Exception:
-        log.exception("Telegram polling stopped")
-
-
-# ---------------- GitHub webhook formatting ----------------
-def repository_info(data: dict[str, Any]) -> tuple[str, str]:
-    repo = data.get("repository") or {}
-    return value(repo, "name", "repository"), value(repo, "html_url")
-
-
-def sender_info(data: dict[str, Any]) -> tuple[str, str]:
-    sender = data.get("sender") or {}
-    return value(sender, "login", "unknown"), value(sender, "html_url")
-
-
-def format_event(data: dict[str, Any], event: str) -> str | None:
-    repo, repo_url = repository_info(data)
-    sender, sender_url = sender_info(data)
-    repo_link = link(repo_url, repo)
-    sender_link = link(sender_url, sender)
-
-    if event == "ping" or data.get("hook"):
-        return f"🙌 Webhook connected for {repo_link} by {sender_link}!"
-
-    if event == "push" or data.get("commits"):
-        commits = data.get("commits") or []
-        shown = commits[:10]
-        lines = []
-        for commit in shown:
-            msg = escape(value(commit, "message").splitlines()[0][:300])
-            commit_url = value(commit, "url")
-            sha = value(commit, "id")[:7]
-            author = commit.get("author") or {}
-            author_name = escape(value(author, "name", "unknown"))
-            lines.append(f"{msg}\n{link(commit_url, sha)} — {author_name}")
-        ref = value(data, "ref").split("/")[-1]
-        extra = f"\n\n<i>And {len(commits) - 10} other commits</i>" if len(commits) > 10 else ""
-        return f"✨ <b>{escape(repo)}</b> — {len(commits)} new commit(s) ({escape(ref)})\n\n" + "\n\n".join(lines) + extra
-
-    issue = data.get("issue")
-    if issue:
-        action = escape(value(data, "action", "updated"))
-        if data.get("comment"):
-            comment = data["comment"]
-            return (
-                f"💬 New comment on <b>{escape(repo)}</b>\n"
-                f"{escape(value(comment, 'body'))}\n\n"
-                f"{link(value(issue, 'html_url'), 'Issue #' + value(issue, 'number'))}"
-            )
+    if not data:
         return (
-            f"🚨 {action.title()} issue in <b>{escape(repo)}</b>\n"
-            f"<b>{escape(value(issue, 'title'))}</b>\n"
-            f"{escape(value(issue, 'body'))}\n\n"
-            f"{link(value(issue, 'html_url'), 'Issue #' + value(issue, 'number'))}"
+            f"<b>Add this url:</b> "
+            f"{ip_addr}/{groupid} to webhooks of the project"
         )
 
-    pull = data.get("pull_request")
-    if pull:
-        action = escape(value(data, "action", "updated"))
-        if data.get("comment"):
-            comment = data["comment"]
-            return (
-                f"💬 New pull-request comment in <b>{escape(repo)}</b>\n"
-                f"{escape(value(comment, 'body'))}\n\n"
-                f"{link(value(pull, 'html_url'), 'Pull request #' + value(pull, 'number'))}"
-            )
-        return (
-            f"❗ {action.title()} pull request in <b>{escape(repo)}</b> "
-            f"({escape(value(pull, 'state'))})\n"
-            f"<b>{escape(value(pull, 'title'))}</b>\n"
-            f"{escape(value(pull, 'body'))}\n\n"
-            f"{link(value(pull, 'html_url'), 'Pull request #' + value(pull, 'number'))}"
-        )
+    if data.get('hook'):
+        repo_url = data['repository']['html_url']
+        repo_name = data['repository']['name']
+        sender_url = data['sender']['html_url']
+        sender_name = data['sender']['login']
 
-    if event == "fork" or data.get("forkee"):
-        forkee = data.get("forkee") or data.get("repository") or {}
-        return (
-            f"🍴 {sender_link} forked {link(value(forkee, 'html_url'), value(forkee, 'name', repo))}!"
-        )
-
-    release = data.get("release")
-    if release:
-        action = escape(value(data, "action", "updated"))
-        body = escape(value(release, "body"))
-        downloads = []
-        if value(release, "tarball_url"):
-            downloads.append(link(value(release, "tarball_url"), "Download tar"))
-        if value(release, "zipball_url"):
-            downloads.append(link(value(release, "zipball_url"), "Download zip"))
-        suffix = " | ".join(downloads)
-        return (
-            f"📦 {sender_link} {action} a release for {repo_link}!\n\n"
-            f"<b>{escape(value(release, 'name'))}</b> ({escape(value(release, 'tag_name'))})\n"
-            f"{body}\n\n{suffix}"
-        )
-
-    # Generic repository events (stars, branch/tag events, membership, etc.).
-    action = data.get("action")
-    if action:
-        return f"🔔 {sender_link} {escape(value(data, 'action'))} {repo_link}."
-
-    if data.get("ref_type"):
-        return f"🏷️ A new {escape(value(data, 'ref_type'))} was created on {repo_link} by {sender_link}."
-
-    if data.get("created") or data.get("deleted") or data.get("forced"):
-        ref = escape(value(data, "ref").split("/")[-1])
-        verb = "created" if data.get("created") else "deleted" if data.get("deleted") else "force-updated"
-        return f"🌿 Branch/tag <b>{ref}</b> was {verb} on {repo_link} by {sender_link}."
-
-    if data.get("pages"):
-        pages = data.get("pages") or []
-        lines = [f"📝 {escape(value(p, 'title'))} ({escape(value(p, 'action'))}) — {link(value(p, 'html_url'), value(p, 'page_name'))}" for p in pages]
-        return f"📚 Wiki updated on {repo_link} by {sender_link}.\n\n" + "\n".join(lines)
-
-    return None
-
-
-@server.route("/", methods=["GET"])
-def hello_world():
-    return jsonify({"ok": True, "service": "GitGram", "status": "running"})
-
-
-@server.route("/<groupid>", methods=["GET", "POST"])
-def git_api(groupid: str):
-    if request.method == "GET":
-        if not APP_URL:
-            return f"Webhook URL: /{escape(groupid)}"
-        return f"Webhook URL: {escape(APP_URL)}/{escape(groupid)}"
-
-    raw = request.get_data(cache=True)
-    if not verify_github_signature(raw):
-        log.warning("Rejected webhook with invalid GitHub signature")
-        return jsonify({"ok": False, "error": "invalid signature"}), 401
-
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({"ok": False, "error": "JSON body required"}), 400
-
-    event = request.headers.get("X-GitHub-Event", "").lower()
-    message = format_event(data, event)
-    if message is None:
-        # Preserve the original GitGram debugging behavior: unknown webhook
-        # payloads are sent to DelDog so the admin can inspect them.
-        log_url = deldog(data)
         response = post_tg(
             groupid,
-            "🚫 Webhook endpoint received an unsupported event."
-            f"\n\nLink to logs for debugging: {log_url}",
-            "html",
+            f"🙌 Successfully set webhook for "
+            f"<a href='{repo_url}'>{repo_name}</a> "
+            f"by <a href='{sender_url}'>{sender_name}</a>!",
+            "html"
         )
-        return jsonify(response), (200 if response.get("ok") else 502)
 
-    result = post_tg(groupid, message)
-    status = 200 if result.get("ok") else 502
-    return jsonify(result), status
+        return response
 
+    if data.get('commits'):
+        commits_text = ""
 
-def deldog(data: dict) -> str:
-    """Store an unsupported webhook payload on DelDog for debugging.
+        rng = len(data['commits'])
 
-    This intentionally preserves GitGram's original third-party debugging
-    behavior, but adds a timeout and clear error handling so a DelDog outage
-    cannot hang the webhook request indefinitely.
-    """
-    base_url = "https://del.dog"
-    try:
-        response = post(
-            f"{base_url}/documents",
-            data=str(data).encode("utf-8"),
-            timeout=10,
+        if rng > 10:
+            rng = 10
+
+        for x in range(rng):
+            commit = data['commits'][x]
+
+            if len(escape(commit['message'])) > 300:
+                commit_msg = escape(commit['message']).split("\n")[0]
+            else:
+                commit_msg = escape(commit['message'])
+
+            commits_text += (
+                f"{commit_msg}\n"
+                f"<a href='{commit['url']}'>{commit['id'][:7]}</a> - "
+                f"{commit['author']['name']} "
+                f"{escape('<')}{commit['author']['email']}{escape('>')}\n\n"
+            )
+
+            if len(commits_text) > 1000:
+                text = (
+                    f"✨ <b>{escape(data['repository']['name'])}</b> - "
+                    f"New {len(data['commits'])} commits "
+                    f"({escape(data['ref'].split('/')[-1])})\n"
+                    f"{commits_text}"
+                )
+
+                response = post_tg(groupid, text, "html")
+                commits_text = ""
+
+        if not commits_text:
+            return jsonify({
+                "ok": True,
+                "text": "Commits text is none"
+            })
+
+        text = (
+            f"✨ <b>{escape(data['repository']['name'])}</b> - "
+            f"New {len(data['commits'])} commits "
+            f"({escape(data['ref'].split('/')[-1])})\n"
+            f"{commits_text}"
         )
-        response.raise_for_status()
-        payload = response.json()
-        key = payload.get("key")
-        if not key:
-            raise ValueError("DelDog response did not contain a document key")
-        if payload.get("isUrl"):
-            return f"{base_url}/{key}"
-        return f"{base_url}/{key}"
-    except Exception as exc:
-        log.exception("Failed to upload webhook payload to DelDog: %s", exc)
-        return "DelDog upload failed; check the server logs for the payload."
+
+        if len(data['commits']) > 10:
+            text += (
+                f"\n\n<i>And "
+                f"{len(data['commits']) - 10} other commits</i>"
+            )
+
+        response = post_tg(groupid, text, "html")
+
+        return response
+
+    if data.get('issue'):
+        if data.get('comment'):
+            text = (
+                f"💬 New comment: "
+                f"<b>{escape(data['repository']['name'])}</b>\n"
+                f"{escape(data['comment']['body'])}\n\n"
+                f"<a href='{data['comment']['html_url']}'>"
+                f"Issue #{data['issue']['number']}</a>"
+            )
+
+            response = post_tg(groupid, text, "html")
+            return response
+
+        text = (
+            f"🚨 New {data['action']} issue for "
+            f"<b>{escape(data['repository']['name'])}</b>\n"
+            f"<b>{escape(data['issue']['title'])}</b>\n"
+            f"{escape(data['issue']['body'])}\n\n"
+            f"<a href='{data['issue']['html_url']}'>"
+            f"issue #{data['issue']['number']}</a>"
+        )
+
+        response = post_tg(groupid, text, "html")
+        return response
+
+    if data.get('pull_request'):
+        if data.get('comment'):
+            text = (
+                f"❗ There is a new pull request for "
+                f"<b>{escape(data['repository']['name'])}</b> "
+                f"({data['pull_request']['state']})\n"
+                f"{escape(data['comment']['body'])}\n\n"
+                f"<a href='{data['comment']['html_url']}'>"
+                f"Pull request #{data['issue']['number']}</a>"
+            )
+
+            response = post_tg(groupid, text, "html")
+            return response
+
+        text = (
+            f"❗ New {data['action']} pull request for "
+            f"<b>{escape(data['repository']['name'])}</b>\n"
+            f"<b>{escape(data['pull_request']['title'])}</b> "
+            f"({data['pull_request']['state']})\n"
+            f"{escape(data['pull_request']['body'])}\n\n"
+            f"<a href='{data['repository']['html_url']}'>"
+            f"Pull request #{data['pull_request']['number']}</a>"
+        )
+
+        response = post_tg(groupid, text, "html")
+        return response
+
+    if data.get('forkee'):
+        response = post_tg(
+            groupid,
+            f"🍴 <a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a> forked "
+            f"<a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a>!\n"
+            f"Total forks now are "
+            f"{data['repository']['forks_count']}",
+            "html"
+        )
+
+        return response
+
+    if data.get('action'):
+
+        if data.get('action') == "published" and data.get('release'):
+            text = (
+                f"<a href='{data['sender']['html_url']}'>"
+                f"{data['sender']['login']}</a> "
+                f"{data['action']} "
+                f"<a href='{data['repository']['html_url']}'>"
+                f"{data['repository']['name']}</a>!"
+            )
+
+            text += (
+                f"\n\n<b>{data['release']['name']}</b> "
+                f"({data['release']['tag_name']})\n"
+                f"{data['release']['body']}\n\n"
+                f"<a href='{data['release']['tarball_url']}'>"
+                f"Download tar</a> | "
+                f"<a href='{data['release']['zipball_url']}'>"
+                f"Download zip</a>"
+            )
+
+            response = post_tg(groupid, text, "html")
+            return response
+
+        if data.get('action') == "started":
+            text = (
+                f"🌟 <a href='{data['sender']['html_url']}'>"
+                f"{data['sender']['login']}</a> gave a star to "
+                f"<a href='{data['repository']['html_url']}'>"
+                f"{data['repository']['name']}</a>!\n"
+                f"Total stars are now "
+                f"{data['repository']['stargazers_count']}"
+            )
+
+            response = post_tg(groupid, text, "html")
+            return response
+
+        if data.get('action') == "edited" and data.get('release'):
+            text = (
+                f"<a href='{data['sender']['html_url']}'>"
+                f"{data['sender']['login']}</a> "
+                f"{data['action']} "
+                f"<a href='{data['repository']['html_url']}'>"
+                f"{data['repository']['name']}</a>!"
+            )
+
+            text += (
+                f"\n\n<b>{data['release']['name']}</b> "
+                f"({data['release']['tag_name']})\n"
+                f"{data['release']['body']}\n\n"
+                f"<a href='{data['release']['tarball_url']}'>"
+                f"Download tar</a> | "
+                f"<a href='{data['release']['zipball_url']}'>"
+                f"Download zip</a>"
+            )
+
+            response = post_tg(groupid, text, "html")
+            return response
+
+        if data.get('action') == "created":
+            return jsonify({
+                "ok": True,
+                "text": "Pass trigger for created"
+            })
+
+        response = post_tg(
+            groupid,
+            f"<a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a> "
+            f"{data['action']} "
+            f"<a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a>!",
+            "html"
+        )
+
+        return response
+
+    if data.get('ref_type'):
+        response = post_tg(
+            groupid,
+            f"A new {data['ref_type']} on "
+            f"<a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a> was created by "
+            f"<a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a>!",
+            "html"
+        )
+
+        return response
+
+    if data.get('created'):
+        response = post_tg(
+            groupid,
+            f"Branch {data['ref'].split('/')[-1]} "
+            f"<b>{data['ref'].split('/')[-2]}</b> on "
+            f"<a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a> was created by "
+            f"<a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a>!",
+            "html"
+        )
+
+        return response
+
+    if data.get('deleted'):
+        response = post_tg(
+            groupid,
+            f"Branch {data['ref'].split('/')[-1]} "
+            f"<b>{data['ref'].split('/')[-2]}</b> on "
+            f"<a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a> was deleted by "
+            f"<a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a>!",
+            "html"
+        )
+
+        return response
+
+    if data.get('forced'):
+        response = post_tg(
+            groupid,
+            f"Branch {data['ref'].split('/')[-1]} "
+            f"<b>{data['ref'].split('/')[-2]}</b>"
+            f" on <a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a> was"
+            f" forced by <a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a>!",
+            "html"
+        )
+
+        return response
+
+    if data.get('pages'):
+        text = (
+            f"<a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a> wiki pages were updated by "
+            f"<a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a>!\n\n"
+        )
+
+        for x in data['pages']:
+            summary = ""
+
+            if x['summary']:
+                summary = f"{x['summary']}\n"
+
+            text += (
+                f"📝 <b>{escape(x['title'])}</b> "
+                f"({x['action']})\n"
+                f"{summary}"
+                f"<a href='{x['html_url']}'>{x['page_name']}</a> - "
+                f"{x['sha'][:7]}"
+            )
+
+            if len(data['pages']) >= 2:
+                text += "\n=====================\n"
+
+            response = post_tg(groupid, text, "html")
+
+        return response
+
+    if data.get('context'):
+        if data.get('state') == "pending":
+            emo = "⏳"
+        elif data.get('state') == "success":
+            emo = "✔️"
+        elif data.get('state') == "failure":
+            emo = "❌"
+        else:
+            emo = "🌀"
+
+        text = (
+            f"{emo} <a href='{data['target_url']}'>"
+            f"{data['description']}</a>"
+            f" on <a href='{data['repository']['html_url']}'>"
+            f"{data['repository']['name']}</a>"
+            f" by <a href='{data['sender']['html_url']}'>"
+            f"{data['sender']['login']}</a>!"
+            f"\nLatest commit:\n"
+            f"<a href='{data['commit']['commit']['url']}'>"
+            f"{escape(data['commit']['commit']['message'])}</a>"
+        )
+
+        response = post_tg(groupid, text, "html")
+        return response
+
+    # Original DelDog debugging system
+    url = deldog(data)
+
+    response = post_tg(
+        groupid,
+        "🚫 Webhook endpoint for this chat has received something "
+        "that doesn't understood yet. "
+        f"\n\nLink to logs for debugging: {url}",
+        "markdown"
+    )
+
+    return response
 
 
-def validate_bot_token() -> bool:
-    result = tg_request("getMe")
-    if not result.get("ok"):
-        log.error("Telegram bot token validation failed")
-        return False
-    log.info("Logged in as @%s", result["result"].get("username", "unknown"))
-    return True
+def deldog(data):
+    """Pasing the stings to del.dog"""
+    BASE_URL = 'https://del.dog'
+
+    r = post(
+        f'{BASE_URL}/documents',
+        data=str(data).encode('utf-8')
+    )
+
+    if r.status_code == 404:
+        r.raise_for_status()
+
+    res = r.json()
+
+    if r.status_code != 200:
+        r.raise_for_status()
+
+    key = res['key']
+
+    if res['isUrl']:
+        reply = (
+            f'DelDog URL: {BASE_URL}/{key}\n'
+            f'You can view stats, etc. '
+            f'[here]({BASE_URL}/v/{key})'
+        )
+    else:
+        reply = f'{BASE_URL}/{key}'
+
+    return reply
 
 
 if __name__ == "__main__":
-    log.info("Starting GitGram on port %s", PORT)
-    if not validate_bot_token():
-        raise SystemExit(1)
-
-    threading.Thread(target=run_bot_polling, name="telegram-polling", daemon=True).start()
-    server.run(host="0.0.0.0", port=PORT, threaded=True)
+    # We can't use port 80 due to the root access requirement.
+    port = int(environ.get("PORT", 8080))
+    server.run(host="0.0.0.0", port=port)
