@@ -117,7 +117,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
         await update.effective_message.reply_text(
-            "Support: @ArchonCare"
+            "Support: https://t.me/GitGramChat"
         )
 
 
@@ -306,7 +306,7 @@ def deldog(data: dict) -> str:
     """
     base_url = "https://del.dog"
     try:
-        response = HTTP.post(
+        response = post(
             f"{base_url}/documents",
             data=str(data).encode("utf-8"),
             timeout=10,
